@@ -1,5 +1,6 @@
 use distributary::{ControllerHandle, DataType, Table, View, ZookeeperAuthority};
 
+use failure;
 use msql_srv::{self, *};
 use nom_sql::{
     self, ColumnConstraint, InsertStatement, Literal, SelectSpecification, SelectStatement,
@@ -16,6 +17,7 @@ use std::sync::{self, Arc, RwLock};
 use std::time;
 
 use convert::ToDataType;
+use referred_tables::ReferredTables;
 use rewrite;
 use schema::{schema_for_column, schema_for_insert, schema_for_select, Schema};
 use utils;
@@ -78,19 +80,38 @@ impl SoupBackendInner {
         soup
     }
 
-    fn get_or_make_mutator<'a, 'b>(&'a mut self, table: &'b str) -> &'a mut Table {
-        let soup = &mut self.soup;
-        self.inputs.entry(table.to_owned()).or_insert_with(|| {
-            soup.table(table)
-                .expect(&format!("no table named {}", table))
-        })
+    fn ensure_mutator<'a, 'b>(&'a mut self, table: &'b str) -> &'a mut Table {
+        self.get_or_make_mutator(table)
+            .expect(&format!("no table named '{}'!", table))
     }
 
-    fn get_or_make_getter<'a, 'b>(&'a mut self, view: &'b str) -> &'a mut View {
+    fn ensure_getter<'a, 'b>(&'a mut self, view: &'b str) -> &'a mut View {
+        self.get_or_make_getter(view)
+            .expect(&format!("no view named '{}'!", view))
+    }
+
+    fn get_or_make_mutator<'a, 'b>(
+        &'a mut self,
+        table: &'b str,
+    ) -> Result<&'a mut Table, failure::Error> {
         let soup = &mut self.soup;
-        self.outputs
-            .entry(view.to_owned())
-            .or_insert_with(|| soup.view(view).expect(&format!("no view named '{}'", view)))
+        if !self.inputs.contains_key(table) {
+            let t = soup.table(table)?;
+            self.inputs.insert(table.to_owned(), t);
+        }
+        Ok(self.inputs.get_mut(table).unwrap())
+    }
+
+    fn get_or_make_getter<'a, 'b>(
+        &'a mut self,
+        view: &'b str,
+    ) -> Result<&'a mut View, failure::Error> {
+        let soup = &mut self.soup;
+        if !self.outputs.contains_key(view) {
+            let vh = soup.view(view)?;
+            self.outputs.insert(view.to_owned(), vh);
+        }
+        Ok(self.outputs.get_mut(view).unwrap())
     }
 }
 
@@ -154,6 +175,35 @@ impl SoupBackend {
         }
     }
 
+    fn fetch_endpoints(&mut self, need: Vec<nom_sql::Table>) {
+        let mut table_schemas = (*self.table_schemas).write().unwrap();
+        for t in need {
+            //  1. check inner.inputs/inner.outputs
+            if let Some(th) = self.inner.inputs.get(&t.name) {
+                if !table_schemas.contains_key(&t.name) {
+                    table_schemas.insert(t.name, Schema::Table(th.schema().unwrap().clone()));
+                }
+            } else if let Some(vh) = self.inner.outputs.get(&t.name) {
+                if !table_schemas.contains_key(&t.name) {
+                    table_schemas.insert(t.name, Schema::View(vh.schema().unwrap().to_vec()));
+                }
+            } else {
+                //  2. If nothing, RPC for view
+                if let Ok(vh) = self.inner.get_or_make_getter(&t.name) {
+                    table_schemas.insert(t.name, Schema::View(vh.schema().unwrap().to_vec()));
+                } else {
+                    //  3. If nothing, RPC for table
+                    if let Ok(th) = self.inner.get_or_make_mutator(&t.name) {
+                        table_schemas.insert(t.name, Schema::Table(th.schema().unwrap().clone()));
+                    } else {
+                        //  4. If still nothing, panic
+                        panic!("no view or table named '{}'", t.name);
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_create_table<W: io::Write>(
         &mut self,
         q: nom_sql::CreateTableStatement,
@@ -163,8 +213,6 @@ impl SoupBackend {
         // doing a migration on Soup ever time. On the other hand, CREATE TABLE is rare...
         match self.inner.soup.extend_recipe(&format!("{};", q)) {
             Ok(_) => {
-                let mut ts_lock = self.table_schemas.write().unwrap();
-                ts_lock.insert(q.table.name.clone(), Schema::Table(q));
                 // no rows to return
                 // TODO(malte): potentially eagerly cache the mutator for this table
                 results.completed(0, 0)
@@ -206,8 +254,6 @@ impl SoupBackend {
             .extend_recipe(&format!("{}: {};", q.name, q.definition))
         {
             Ok(_) => {
-                let mut ts_lock = self.table_schemas.write().unwrap();
-                ts_lock.insert(q.name.clone(), Schema::View(q));
                 // no rows to return
                 results.completed(0, 0)
             }
@@ -225,7 +271,7 @@ impl SoupBackend {
             .expect("only supports DELETEs with WHERE-clauses");
 
         // create a mutator if we don't have one for this table already
-        let mutator = self.inner.get_or_make_mutator(&q.table.name);
+        let mutator = self.inner.ensure_mutator(&q.table.name);
 
         let pkey = if let Some(cts) = mutator.schema() {
             utils::get_primary_key(cts)
@@ -538,7 +584,7 @@ impl SoupBackend {
         let columns_specified = &q.fields;
 
         // create a mutator if we don't have one for this table already
-        let putter = self.inner.get_or_make_mutator(table);
+        let putter = self.inner.ensure_mutator(table);
         let schema: Vec<String> = putter.columns().to_vec();
 
         // handle auto increment
@@ -670,7 +716,7 @@ impl SoupBackend {
         // create a getter if we don't have one for this query already
         // TODO(malte): may need to make one anyway if the query has changed w.r.t. an
         // earlier one of the same name
-        let getter = self.inner.get_or_make_getter(&qname);
+        let getter = self.inner.ensure_getter(&qname);
 
         let write_column = |rw: &mut RowWriter<W>, c: &DataType, cs: &msql_srv::Column| {
             let written = match *c {
@@ -742,7 +788,7 @@ impl SoupBackend {
         params: Option<ParamParser>,
         results: QueryResultWriter<W>,
     ) -> io::Result<()> {
-        let mutator = self.inner.get_or_make_mutator(&q.table.name);
+        let mutator = self.inner.ensure_mutator(&q.table.name);
 
         let q = q.into_owned();
         let (key, updates) = {
@@ -975,6 +1021,17 @@ impl<W: io::Write> MysqlShim<W> for SoupBackend {
             None => {
                 match nom_sql::parse_query(&query) {
                     Ok(mut q) => {
+                        // for all tables and views mentioned in a query we're seeing for the first
+                        // time, fetch the schemas if we don't have them already.
+                        // Note that this implicitly also creates mutators and getters for the
+                        // relevant tables/views.
+                        if let SqlQuery::CreateTable(_) = q {
+                            // don't fetch endpoints, since table does not exist yet
+                        } else {
+                            let endpoints_needed = q.referred_tables();
+                            self.fetch_endpoints(endpoints_needed);
+                        }
+
                         if let SqlQuery::Select(ref mut q) = q {
                             let ts_lock = self.table_schemas.read().unwrap();
                             let table_schemas = &(*ts_lock);

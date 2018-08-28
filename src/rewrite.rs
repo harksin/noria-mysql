@@ -49,19 +49,17 @@ pub(crate) fn expand_stars(sq: &mut SelectStatement, table_schemas: &HashMap<Str
                     alias: None,
                     function: None,
                 })
-            })
-            .collect::<Vec<_>>(),
-        Schema::View(CreateViewStatement {
-            ref name,
-            ref definition,
-            ..
-        }) => match **definition {
-            SelectSpecification::Compound(ref csq) => {
-                // use the first select's columns
-                do_expand_select(&csq.selects[0].1, name)
-            }
-            SelectSpecification::Simple(ref sq) => do_expand_select(sq, name),
-        },
+            }).collect::<Vec<_>>(),
+        Schema::View(ref fields) => fields
+            .iter()
+            .map(|ref f| {
+                FieldDefinitionExpression::Col(Column {
+                    table: Some(table_name.to_owned()),
+                    name: f.column.name.clone(),
+                    alias: None,
+                    function: None,
+                })
+            }).collect::<Vec<_>>(),
     };
 
     let old_fields = mem::replace(&mut sq.fields, vec![]);

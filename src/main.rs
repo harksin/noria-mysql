@@ -7,6 +7,7 @@ extern crate chrono;
 #[macro_use]
 extern crate clap;
 extern crate api as distributary;
+extern crate failure;
 extern crate msql_srv;
 extern crate nom_sql;
 
@@ -19,6 +20,7 @@ extern crate slog_term;
 extern crate regex;
 
 mod convert;
+mod referred_tables;
 mod rewrite;
 mod schema;
 mod soup_backend;
