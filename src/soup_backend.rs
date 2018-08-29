@@ -251,7 +251,7 @@ impl SoupBackend {
         match self
             .inner
             .soup
-            .extend_recipe(&format!("{}: {};", q.name, q.definition))
+            .extend_recipe(&format!("VIEW {}: {};", q.name, q.definition))
         {
             Ok(_) => {
                 // no rows to return
