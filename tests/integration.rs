@@ -695,13 +695,13 @@ fn select_collapse_where_in() {
     assert!(names.iter().any(|s| s == "Bob"));
     assert!(names.iter().any(|s| s == "Jane"));
 
-    let names: Vec<String> =
-        conn.prep_exec(
+    let names: Vec<String> = conn
+        .prep_exec(
             "SELECT Cats.name FROM Cats WHERE Cats.id IN (?, ?, ?)",
             (1, 2, 3),
         ).unwrap()
-            .map(|row| row.unwrap().take::<String, _>(0).unwrap())
-            .collect();
+        .map(|row| row.unwrap().take::<String, _>(0).unwrap())
+        .collect();
     assert_eq!(names.len(), 2);
     assert!(names.iter().any(|s| s == "Bob"));
     assert!(names.iter().any(|s| s == "Jane"));
@@ -715,13 +715,13 @@ fn select_collapse_where_in() {
     assert_eq!(names.len(), 1);
     assert!(names.iter().any(|s| s == "Bob"));
 
-    let names: Vec<String> =
-        conn.prep_exec(
+    let names: Vec<String> = conn
+        .prep_exec(
             "SELECT Cats.name FROM Cats WHERE Cats.name = ? AND Cats.id IN (?, ?)",
             ("Bob", 1, 2),
         ).unwrap()
-            .map(|row| row.unwrap().take::<String, _>(0).unwrap())
-            .collect();
+        .map(|row| row.unwrap().take::<String, _>(0).unwrap())
+        .collect();
     assert_eq!(names.len(), 1);
     assert!(names.iter().any(|s| s == "Bob"));
 }
@@ -761,9 +761,9 @@ fn create_view() {
         .map(|row| row.unwrap())
         .collect();
     assert_eq!(rows.len(), 1);
-    assert!(
-        rows.into_iter()
-            .any(|r| r.unwrap() == vec![4.into(), 2.into()])
+    assert_eq!(
+        rows.into_iter().map(|r| r.unwrap()).collect::<Vec<_>>(),
+        vec![vec!["4".into(), "2".into()]]
     );
 
     let rows: Vec<_> = conn
